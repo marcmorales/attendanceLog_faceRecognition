@@ -1,0 +1,12 @@
+# Ignore the student photos
+dataset/
+
+# Ignore the trained AI data 
+encodings.pickle
+
+# Ignore your private Google Key
+service_account.json
+
+# Ignore local logs
+attendance_log.json
+*.jpg
