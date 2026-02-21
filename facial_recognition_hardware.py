@@ -81,13 +81,13 @@ def process_frame(frame):
             #Check 2: have we already logged them in this session?
             if name != "Unknown" and name not in already_logged:
                 
-                # 2. Append row to Google Sheets
-                sheet.append_row([name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Present"])
+                # create timestamp variable (to match time between local and cloud data)
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 
                 # create a python "dictionary" (template for our JSON)
                 attendance_entry = {
                     "student_name": name,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "timestamp": timestamp,
                     "status": "Present"
                 }
                 
@@ -102,6 +102,13 @@ def process_frame(frame):
                 
                 # add the name to our 'memory' list so they are not logged again
                 already_logged.append(name) # Prevents duplicates
+                
+                # Append row to Google Sheets under a try block in case for wifi connection to prevent program crashing
+                try:
+                    sheet.append_row([name, timestamp, "Present"])
+                    print(f"[CLOUD] Successfully sent to google sheets for {name}")
+                except Exception as e:
+                    print(f"[ERROR] Could not sync to Google: {e}")
                 
             # --- END OF JSON logic block ---
             
