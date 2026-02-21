@@ -29,14 +29,14 @@ known_face_names = data["names"]
 
 # Initialize the camera
 picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (1920, 1080)}))
+picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)})) # lower resolution from 1920x1080 to 640x480
 picam2.start()
 
 # Initialize GPIO
 output = LED(14)
 
 # Initialize our variables
-cv_scaler = 4 # this has to be a whole number
+cv_scaler = 8 # changed from 4 to 8 to reduce mem strain and boost FPS
 
 face_locations = []
 face_encodings = []
@@ -46,7 +46,7 @@ start_time = time.time()
 fps = 0
 
 # List of names that will trigger the GPIO pin
-authorized_names = ["john", "alice", "bob"]  # Replace with names you wish to authorise THIS IS CASE-SENSITIVE
+authorized_names = ["Marc", "alice", "bob"]  # Replace with names you wish to authorise THIS IS CASE-SENSITIVE
 
 def process_frame(frame):
     global face_locations, face_encodings, face_names, already_logged
@@ -117,7 +117,9 @@ def process_frame(frame):
                 authorized_face_detected = True
         face_names.append(name)
     
+    # ============================================
     # Control the GPIO pin based on face detection
+    # ============================================
     if authorized_face_detected:
         output.on()  # Turn on Pin
     else:
