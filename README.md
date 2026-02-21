@@ -19,4 +19,6 @@ Step by step process on how to train the model
 	• any logic we want to add in the system (this is where we will mostly add them)
 
 READ BEFORE RUNNING THE PROGRAM
-Make sure you setup Thonny under the virtual environment for face_rec whenever you run the program
+
+Make sure to setup Thonny under the virtual environment for face_rec whenever you run the program.
+If you are running the code under terminal, make sure you are in the virtual environment.
