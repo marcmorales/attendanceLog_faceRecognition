@@ -10,6 +10,8 @@ from datetime import datetime
 import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # 1. Connect to Google Sheets
 scope = [
@@ -19,6 +21,38 @@ scope = [
 creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
 client = gspread.authorize(creds)
 sheet = client.open("Attendance Log").sheet1
+
+# Load roster from Google Sheets
+def load_roster():
+    roster = {}
+    records = sheet.get_all_values()
+    for i, row in enumerate(records[1:], start=2):
+        if len(row) >= 2:
+            name = row[0].strip()
+            student_id = row[1].strip()
+            if name:
+                roster[name] = {'row': i, 'id': student_id, 'name': name}
+    return roster
+
+roster = load_roster()
+print(f"[INFO] Loaded {len(roster)} students: {[v['name'] for v in roster.values()]}")
+
+# Reset all students to Unknown at start of session
+def initialise_sheet_for_today():
+    print("[INFO] Resetting sheet: marking all students as Unknown...")
+    for student in roster.values():
+        row = student['row']
+        try:
+            sheet.update(f'C{row}:D{row}', [["Unknown", ""]])
+        except Exception as e:
+            print(f"[ERROR] Could not reset row {row} for {student['name']}: {e}")
+    print("[INFO] Sheet reset complete.")
+
+initialise_sheet_for_today()
+
+today_str = datetime.now().strftime("%Y-%m-%d")
+local_log_file = f"attendance_{today_str}.json"
+logged_times = {}
 
 # Load pre-trained face encodings
 print("[INFO] loading encodings...")
@@ -46,10 +80,10 @@ start_time = time.time()
 fps = 0
 
 # List of names that will trigger the GPIO pin
-authorized_names = ["Marc", "alice", "bob"]  # Replace with names you wish to authorise THIS IS CASE-SENSITIVE
+authorized_names = ["Marc", "John", "Soren", "Ryan", "Paul", "Nick"]
 
 def process_frame(frame):
-    global face_locations, face_encodings, face_names, already_logged
+    global face_locations, face_encodings, face_names
     
     # Resize the frame using cv_scaler to increase performance (less pixels processed, less time spent)
     resized_frame = cv2.resize(frame, (0, 0), fx=(1/cv_scaler), fy=(1/cv_scaler))
@@ -83,32 +117,40 @@ def process_frame(frame):
                 
                 # create timestamp variable (to match time between local and cloud data)
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                time_only = datetime.now().strftime("%H:%M:%S")  # time-only string for the sheet's Time column
                 
-                # create a python "dictionary" (template for our JSON)
-                attendance_entry = {
-                    "student_name": name,
-                    "timestamp": timestamp,
-                    "status": "Present"
-                }
-                
-                # Convert to JSON and save locally for now
-                json_payload = json.dumps(attendance_entry) # covert "dictionary" into JSON string
-                print(f"[ATTENDANCE] Logged: {json_payload}") # prints to terminal to see it live
+                # check the student exists in the roster we loaded from Google Sheets at startup
+                if name in roster:  # removed name_lower, now compares directly against roster
+                    row = roster[name]['row']  # NEW: get the exact sheet row number for this student
+                    try:
+                        # updates the student's existing row instead of appending a new row at the bottom
+                        sheet.update(f'C{row}:D{row}', [["Present", time_only]])
+                        print(f"[CLOUD] Updated row {row} → {name}: Present at {time_only}")
+                    except Exception as e:
+                        print(f"[ERROR] Could not update Google Sheet for {name}: {e}")
+                else:
+                    print(f"[WARNING] {name} recognised but not found in roster.")  # NEW: warns if face is known but missing from the sheet
 
-                # Open or create the log file in 'append' mode ("a")
-                # 'with' ensures the file is closed and saved safely immediately
-                with open("attendance_log.json", "a") as f:
-                    f.write(json_payload + "\n") # Write the JSON and a new line
-                
                 # add the name to our 'memory' list so they are not logged again
-                already_logged.append(name) # Prevents duplicates
-                
-                # Append row to Google Sheets under a try block in case for wifi connection to prevent program crashing
-                try:
-                    sheet.append_row([name, timestamp, "Present"])
-                    print(f"[CLOUD] Successfully sent to google sheets for {name}")
-                except Exception as e:
-                    print(f"[ERROR] Could not sync to Google: {e}")
+                already_logged.append(name)  # Prevents duplicates
+                logged_times[name] = timestamp  # NEW: store timestamp so export_to_xlsx() can reference it when R is pressed
+
+                # replaces the old append logic — instead of adding one line per detection,
+                # we rewrite the entire file each time as a clean snapshot (one entry per student)
+                snapshot = []
+                for student in roster.values():
+                    n = student['name']
+                    snapshot.append({
+                        "student_name": n,
+                        "student_id": student['id'],  # includes student ID
+                        "status": "Present" if n in already_logged else "Unknown",  # default is "Unknown" instead of "Absent"
+                        "time_logged": logged_times.get(n, ""),
+                        "date": today_str
+                    })
+                # "w" overwrites the file each time instead of "a" which appended
+                with open(local_log_file, "w") as f:
+                    json.dump(snapshot, f, indent=2)
+                print(f"[LOCAL] Snapshot updated: {name} marked Present at {timestamp}")
                 
             # --- END OF JSON logic block ---
             
@@ -150,6 +192,53 @@ def draw_results(frame):
     
     return frame
 
+def export_to_xlsx():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Attendance"
+
+    header_font  = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+    header_fill  = PatternFill("solid", start_color="2E75B6")
+    present_fill = PatternFill("solid", start_color="C6EFCE")
+    absent_fill  = PatternFill("solid", start_color="FFCCCC")
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align   = Alignment(horizontal="left", vertical="center")
+    thin         = Side(style="thin", color="CCCCCC")
+    border       = Border(top=thin, bottom=thin, left=thin, right=thin)
+
+    headers    = ["Name", "ID", "Status", "Time"]
+    col_widths = [20, 10, 12, 20]
+
+    for col, (header, width) in enumerate(zip(headers, col_widths), start=1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = border
+        ws.column_dimensions[cell.column_letter].width = width
+    ws.row_dimensions[1].height = 22
+
+    for row_idx, student in enumerate(roster.values(), start=2):
+        name       = student['name']
+        student_id = student['id']
+        if name in already_logged:
+            status, time_val, row_fill = "Present", logged_times.get(name, ""), present_fill
+        else:
+            status, time_val, row_fill = "Absent", "", absent_fill
+
+        for col, (val, align) in enumerate(zip([name, student_id, status, time_val],
+                                                [left_align, center_align, center_align, center_align]), start=1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            cell.fill = row_fill
+            cell.alignment = align
+            cell.border = border
+            cell.font = Font(name="Arial", size=10)
+        ws.row_dimensions[row_idx].height = 18
+
+    filename = f"attendance_report_{today_str}.xlsx"
+    wb.save(filename)
+    print(f"[EXPORT] Spreadsheet saved as '{filename}'")
+
 def calculate_fps():
     global frame_count, start_time, fps
     frame_count += 1
@@ -180,12 +269,20 @@ while True:
     cv2.putText(display_frame, f"FPS: {current_fps:.1f}", (display_frame.shape[1] - 150, 30), 
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
     
+    # ADD hint on screen
+    cv2.putText(display_frame, "R: Export Report | Q: Quit",
+                (10, display_frame.shape[0] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    
     # Display everything over the video feed.
     cv2.imshow('Video', display_frame)
-    
-    # Break the loop and stop the script if 'q' is pressed
-    if cv2.waitKey(1) == ord("q"):
+
+    # UPDATED key handling
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord("q"):
         break
+    elif key == ord("r"):
+        export_to_xlsx()
 
 # By breaking the loop we run this code here which closes everything
 cv2.destroyAllWindows()
