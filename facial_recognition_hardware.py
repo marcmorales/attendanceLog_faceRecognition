@@ -10,17 +10,86 @@ from datetime import datetime
 import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from apiclient import discovery
+import datetime
+from google.oauth2 import service_account
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import pickle, os
+import csv
 
 # 1. Connect to Google Sheets
+SERVICE_ACCOUNT_FILE = "service_account.json"
 scope = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
 ]
-creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+
+credentials = service_account.Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE,
+    scopes=scope
+)
+if os.path.exists('token.pickle'):
+    with open('token.pickle', 'rb') as f:
+        creds = pickle.load(f)
+else:
+    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', scope)
+    creds = flow.run_local_server(port=0)
+    with open('token.pickle', 'wb') as f:
+        pickle.dump(creds, f)
 client = gspread.authorize(creds)
-sheet = client.open("Attendance Log").sheet1
+destFolderId = '14T2ZsjNFM5uMHns9nZaSEelVlswWlmGz'
+# List of names that will trigger the GPIO pin
+authorized_names = []
+ids = []
+with open('information.csv', mode ='r', encoding='utf-8-sig')as file:
+  csvFile = csv.reader(file)
+  for lines in csvFile:
+        authorized_names.append(lines[0])
+        ids.append(lines[1])
+# Ask whether you want to create new log or open previous file
+def createNewFile():
+    x = datetime.datetime.now()
+    title = "Attendance Tracker " + x.strftime("%x") + ", "+ x.strftime("%X")
+    drive_service = discovery.build('drive', 'v3', credentials=creds)  # Use "credentials" of "gspread.authorize(credentials)".
+    file_metadata = {
+        'name': title,
+        'mimeType': 'application/vnd.google-apps.spreadsheet',
+        'parents': [destFolderId]
+    }
+    file = drive_service.files().create(body=file_metadata).execute()
+    print(file)
+    sheet = client.open(title).sheet1
+    sheet.update_cell(1,1,"Name")
+    sheet.update_cell(1,2,"ID")
+    sheet.update_cell(1,3,"Status")
+    sheet.update_cell(1,4,"Time")
+    for i in range(len(authorized_names)):
+        sheet.update_cell(i + 2, 1, authorized_names[i])
+        sheet.update_cell(i + 2, 2, ids[i])
+        sheet.update_cell(i + 2, 3, "Unknown")
+    return sheet
+def openPreviousFile(sheet):
+    filename = input("Please input name or ID of spreadsheet you wish to open")
+    sheet = client.open(filename).sheet1
+    return sheet
+
+
+while True:
+    openPreviousFileOrCreateNewLog = input("Please input 1 to create new log, and input 2 to open previous file:\n")
+    if(openPreviousFileOrCreateNewLog == "1"):
+        sheet = createNewFile()
+        break
+    elif(openPreviousFileOrCreateNewLog == "2"):
+        sheet = openPreviousFile()
+        break
+    else:
+        print("Invalid input. Please try again")
+
+
 
 # Load roster from Google Sheets
 def load_roster():
@@ -37,18 +106,6 @@ def load_roster():
 roster = load_roster()
 print(f"[INFO] Loaded {len(roster)} students: {[v['name'] for v in roster.values()]}")
 
-# Reset all students to Unknown at start of session
-def initialise_sheet_for_today():
-    print("[INFO] Resetting sheet: marking all students as Unknown...")
-    for student in roster.values():
-        row = student['row']
-        try:
-            sheet.update(f'C{row}:D{row}', [["Unknown", ""]])
-        except Exception as e:
-            print(f"[ERROR] Could not reset row {row} for {student['name']}: {e}")
-    print("[INFO] Sheet reset complete.")
-
-initialise_sheet_for_today()
 
 today_str = datetime.now().strftime("%Y-%m-%d")
 local_log_file = f"attendance_{today_str}.json"
@@ -79,8 +136,7 @@ frame_count = 0
 start_time = time.time()
 fps = 0
 
-# List of names that will trigger the GPIO pin
-authorized_names = ["Marc", "John", "Soren", "Ryan", "Paul", "Nick"]
+
 
 def process_frame(frame):
     global face_locations, face_encodings, face_names
