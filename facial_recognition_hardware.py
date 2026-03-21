@@ -497,6 +497,7 @@ running = True
 while True:
     # Capture a frame from camera
     frame = picam2.capture_array()
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
     
     # Process the frame with the function
     processed_frame = process_frame(frame)
