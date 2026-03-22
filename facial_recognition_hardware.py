@@ -9,7 +9,12 @@ import json
 from datetime import datetime
 import os
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from apiclient import discovery
+from google.oauth2 import service_account
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import csv
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -20,9 +25,76 @@ scope = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
 ]
-creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+# removed: creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+# 
+if os.path.exists('token.pickle'):
+    with open('token.pickle', 'rb') as f:
+        creds = pickle.load(f)
+else:
+    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', scope)
+    creds = flow.run_local_server(port=0)
+    with open('token.pickle', 'wb') as f:
+        pickle.dump(creds, f)
 client = gspread.authorize(creds)
-sheet = client.open("Attendance Log").sheet1
+
+# removed: sheet = client.open("Attendance Log").sheet1
+destFolderId = '' # note that google drive ID is under class[letter] line 1
+authorized_names = []
+ids = []
+
+with open('classA.csv', mode='r', encoding='utf-8-sig') as file:
+    csvFile = csv.reader(file)
+    for i, lines in enumerate(csvFile):
+        if i == 0:
+            destFolderId = lines[0] #line 1 of class[letter] is where we should add the google drive folder ID
+            continue
+        authorized_names.append(lines[0])
+        ids.append(lines[1])
+
+# ADDED: creates a new dated spreadsheet in the Drive folder, pre-populated from CSV
+def createNewFile():
+    x = datetime.now()
+    title = "Attendance Tracker " + x.strftime("%x") + ", " + x.strftime("%X")
+    drive_service = discovery.build('drive', 'v3', credentials=creds)
+    file_metadata = {
+        'name': title,
+        'mimeType': 'application/vnd.google-apps.spreadsheet',
+        'parents': [destFolderId]
+    }
+    file = drive_service.files().create(body=file_metadata).execute()
+    print(file)
+    sheet = client.open(title).sheet1
+    sheet.update_cell(1, 1, "Name")
+    sheet.update_cell(1, 2, "ID")
+    sheet.update_cell(1, 3, "Status")
+    sheet.update_cell(1, 4, "Time")
+    for i in range(len(authorized_names)):
+        sheet.update_cell(i + 2, 1, authorized_names[i])
+        sheet.update_cell(i + 2, 2, ids[i])
+        sheet.update_cell(i + 2, 3, "Unknown")
+    return sheet
+
+# ADDED: opens an existing spreadsheet by name from Drive
+def openPreviousFile():
+    while True:
+        filename = input("Please input name of spreadsheet you wish to open: ")
+        try:
+            sheet = client.open(filename).sheet1
+            return sheet
+        except gspread.exceptions.SpreadsheetNotFound:
+            print(f"[ERROR] Spreadsheet '{filename}' not found. Please try again.")
+
+# ADDED: startup prompt — runs before anything else, user picks new or existing sheet
+while True:
+    openPreviousFileOrCreateNewLog = input("Please input 1 to create new log, and input 2 to open previous file:\n")
+    if openPreviousFileOrCreateNewLog == "1":
+        sheet = createNewFile()
+        break
+    elif openPreviousFileOrCreateNewLog == "2":
+        sheet = openPreviousFile()
+        break
+    else:
+        print("Invalid input. Please try again")
 
 # Load roster from Google Sheets
 def load_roster():
@@ -40,17 +112,17 @@ roster = load_roster()
 print(f"[INFO] Loaded {len(roster)} students: {[v['name'] for v in roster.values()]}")
 
 # Reset all students to Unknown at start of session
-def initialise_sheet_for_today():
-    print("[INFO] Resetting sheet: marking all students as Unknown...")
-    for student in roster.values():
-        row = student['row']
-        try:
-            sheet.update(f'C{row}:D{row}', [["Unknown", ""]])
-        except Exception as e:
-            print(f"[ERROR] Could not reset row {row} for {student['name']}: {e}")
-    print("[INFO] Sheet reset complete.")
+# def initialise_sheet_for_today():
+#     print("[INFO] Resetting sheet: marking all students as Unknown...")
+#     for student in roster.values():
+#         row = student['row']
+#         try:
+#             sheet.update(f'C{row}:D{row}', [["Unknown", ""]])
+#         except Exception as e:
+#             print(f"[ERROR] Could not reset row {row} for {student['name']}: {e}")
+#     print("[INFO] Sheet reset complete.")
 
-initialise_sheet_for_today()
+# initialise_sheet_for_today()
 
 today_str = datetime.now().strftime("%Y-%m-%d")
 local_log_file = f"attendance_{today_str}.json"
@@ -101,7 +173,7 @@ unrecognized_count = 0
 session_log = []
 
 # List of names that will trigger the GPIO pin
-authorized_names = ["Marc", "John", "Soren", "Ryan", "Paul", "Nick"]
+# removed: authorized_names = ["Marc", "John", "Soren", "Ryan", "Paul", "Nick"]
 
 # ─────────────────────────────────────────────
 # 5. Window names
@@ -421,7 +493,7 @@ def draw_results(frame):
     return student_view, teacher_view
 
 # ─────────────────────────────────────────────
-# 8. XLSX export  (unchanged from original)
+# 8. XLSX export
 # ─────────────────────────────────────────────
 def export_to_xlsx():
     wb = Workbook()
@@ -465,10 +537,28 @@ def export_to_xlsx():
             cell.border = border
             cell.font = Font(name="Arial", size=10)
         ws.row_dimensions[row_idx].height = 18
-
-    filename = f"attendance_report_{today_str}.xlsx"
+    
+    # ADDED: save locally as temp file, upload to Drive, then delete local file
+    filename = f"attendance_report_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
     wb.save(filename)
-    print(f"[EXPORT] Spreadsheet saved as '{filename}'")
+    print(f"[EXPORT] Spreadsheet saved locally as '{filename}'")
+
+    try:
+        drive_service = discovery.build('drive', 'v3', credentials=creds)
+        file_metadata = {
+            'name': filename,
+            'parents': [destFolderId]
+        }
+        media = MediaFileUpload(filename, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        drive_service.files().create(body=file_metadata, media_body=media).execute()
+        print(f"[DRIVE] Uploaded '{filename}' to Drive folder")
+    except Exception as e:
+        print(f"[ERROR] Could not upload to Drive: {e}")
+    finally:
+        # Delete local file regardless of upload success
+        if os.path.exists(filename):
+            os.remove(filename)
+            print(f"[LOCAL] Deleted local file '{filename}'")
 
 # ─────────────────────────────────────────────
 # 9. FPS helper
