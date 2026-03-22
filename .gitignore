@@ -4,9 +4,12 @@ dataset/
 # Ignore the trained AI data 
 encodings.pickle
 
+
 # Ignore your private Google Key
-service_account.json
+credentials.json
+token.pickle
 
 # Ignore local logs
 attendance_log.json
 *.jpg
+*.json
