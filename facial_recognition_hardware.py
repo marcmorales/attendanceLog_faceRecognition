@@ -384,10 +384,12 @@ def draw_results(frame, sheet_title):
             cv2.rectangle(student_view,
                           (w, banner_top), (w + PANEL_W, h),
                           GREEN_BG, cv2.FILLED)
-            cv2.putText(student_view, "Welcome, {featured_name}!", (info_x, banner_top + 50),
+            welcome_text = f"Welcome, {featured_name}!"
+            text_scale = min(0.95, (PANEL_W - 20) / (len(welcome_text) * 14))
+            cv2.putText(student_view, welcome_text, (info_x, banner_top + 50),
                         FONT, 0.95, GREEN_TEXT, 2)
             cv2.putText(student_view, "Attendance logged", (info_x, banner_top + 82),
-                        FONT_SIMPLE, 0.55, GREEN_TEXT, 1)
+                        FONT_SIMPLE, text_scale, GREEN_TEXT, 1)
         else:
             cv2.rectangle(student_view,
                           (w, banner_top), (w + PANEL_W, h),
