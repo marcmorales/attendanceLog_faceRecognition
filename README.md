@@ -22,3 +22,25 @@ READ BEFORE RUNNING THE PROGRAM
 
 Make sure to setup Thonny under the virtual environment for face_rec whenever you run the program.
 If you are running the code under terminal, make sure you are in the virtual environment.
+
+FOLDER/FILE CHECKLIST
+All of these must be under attendance-Log_faceRecognition folder
+
+	[Python files]
+	image_capture.py
+	model_training.py
+	facial_recognition.py
+	facial_recognition_hardware.py <--- what we edit
+
+	[Folders]
+	dataset <--- holds the images that came from image_capture.py, also used to generate encodings.pickle
+	licenses
+
+	[Google API to connect to google drive] 
+	token.pickle <--- contact me if this is missing. Necessary to connect to Google Drive that host all the attendance log
+	credentials.json <--- API from google cloud to connect Google's API and sheet, contact Marc if missing.
+
+	[CSV files that holds student list]
+	csv files are the list of students that we use to generate the spreadsheet. First line is the folder address.
+	We only have classA.csv for now. If we need another set of student list, create another .csv file IE: classB.csv
+	and edit line 42 under facial_recognition_hardware.py
