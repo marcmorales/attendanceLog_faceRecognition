@@ -5,15 +5,12 @@ from picamera2 import Picamera2
 import time
 import pickle
 from gpiozero import LED
-import json
 from datetime import datetime
 import os
 import gspread
 from apiclient import discovery
 from google.oauth2 import service_account
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
 import csv
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -51,10 +48,12 @@ with open('classA.csv', mode='r', encoding='utf-8-sig') as file:
         authorized_names.append(lines[0])
         ids.append(lines[1])
 
-# ADDED: creates a new dated spreadsheet in the Drive folder, pre-populated from CSV
+# Creates a new dated spreadsheet in the Drive folder, pre-populated from CSV.
+# note that spreadsheet title is per session, w/ unique time identifier
 def createNewFile():
     x = datetime.now()
-    title = "Attendance Tracker " + x.strftime("%x") + ", " + x.strftime("%X")
+    csv_name = os.path.splitext("classA.csv")[0]  # extracts "classA" from "classA.csv"
+    title = "Attendance Log " + csv_name + " " + x.strftime("%x") + ", " + x.strftime("%X")
     drive_service = discovery.build('drive', 'v3', credentials=creds)
     file_metadata = {
         'name': title,
@@ -84,7 +83,7 @@ def openPreviousFile():
         except gspread.exceptions.SpreadsheetNotFound:
             print(f"[ERROR] Spreadsheet '{filename}' not found. Please try again.")
 
-# ADDED: startup prompt — runs before anything else, user picks new or existing sheet
+# Startup prompt — runs before anything else, user picks new or existing sheet
 while True:
     openPreviousFileOrCreateNewLog = input("Please input 1 to create new log, and input 2 to open previous file:\n")
     if openPreviousFileOrCreateNewLog == "1":
@@ -95,6 +94,8 @@ while True:
         break
     else:
         print("Invalid input. Please try again")
+
+sheet_title = sheet.spreadsheet.title
 
 # Load roster from Google Sheets
 def load_roster():
@@ -111,22 +112,37 @@ def load_roster():
 roster = load_roster()
 print(f"[INFO] Loaded {len(roster)} students: {[v['name'] for v in roster.values()]}")
 
-# Reset all students to Unknown at start of session
-# def initialise_sheet_for_today():
-#     print("[INFO] Resetting sheet: marking all students as Unknown...")
-#     for student in roster.values():
-#         row = student['row']
-#         try:
-#             sheet.update(f'C{row}:D{row}', [["Unknown", ""]])
-#         except Exception as e:
-#             print(f"[ERROR] Could not reset row {row} for {student['name']}: {e}")
-#     print("[INFO] Sheet reset complete.")
+logged_times = {}        # stores {name: timestamp} for each student recognized this session, used by xlsx export for the Time column
+already_logged = []      # list of names already recognized this session, prevents the same student from being logged twice
+recognized_count = 0     # running total of recognized students, displayed on the admin view counter card
+unrecognized_count = 0   # running total of unrecognized faces detected, displayed on the admin view counter card
+session_log = []         # full list of recognition events this session [{name, id, status, time}], displayed in the admin view session log
 
-# initialise_sheet_for_today()
+def load_existing_attendance():
+    # already_logged keeps track of who was logged this session,
+    # recognized_count and unrecognized_count is the running counter for the teacher window
+    global already_logged, logged_times, recognized_count, session_log
+    records = sheet.get_all_values()
+    for row in records[1:]:  # skip header row
+        if len(row) >= 4 and row[2].strip() == "Present":
+            name = row[0].strip()
+            time_val = row[3].strip()
+            already_logged.append(name)
+            logged_times[name] = time_val
+            recognized_count += 1
+            session_log.append({
+                "name": name,
+                "id": roster[name]['id'] if name in roster else "N/A",
+                "status": "Recognized",
+                "time": time_val
+            })
+    if already_logged:
+        print(f"[INFO] Pre-loaded {len(already_logged)} already-present students: {already_logged}")
+    else:
+        print("[INFO] No existing attendance found in sheet.")
 
-today_str = datetime.now().strftime("%Y-%m-%d")
-local_log_file = f"attendance_{today_str}.json"
-logged_times = {}
+if openPreviousFileOrCreateNewLog == "2":
+    load_existing_attendance()
 
 # ─────────────────────────────────────────────
 # 2. Load face encodings
@@ -151,29 +167,14 @@ output = LED(14)
 # ─────────────────────────────────────────────
 # 4. State variables
 # ─────────────────────────────────────────────
-cv_scaler = 8 # changed from 4 to 8 to reduce mem strain and boost FPS
-
-face_locations = []
-face_encodings = []
-face_names = []
-frame_count = 0
-start_time = time.time()
-fps = 0
-
-# Keeps track of who was logged this session (no duplicate entries)
-already_logged = []
-
-# Tracks names detected in the CURRENT frame (for live sidebar display)
-current_frame_names = []
-
-# Running counters for the teacher window
-recognized_count = 0
-unrecognized_count = 0
-# Full session log: list of dicts {name, status, time}
-session_log = []
-
-# List of names that will trigger the GPIO pin
-# removed: authorized_names = ["Marc", "John", "Soren", "Ryan", "Paul", "Nick"]
+cv_scaler = 8            # frame downscale factor before face detection, higher = faster but less accurate (changed from 4 to 8)
+face_locations = []      # list of (top, right, bottom, left) bounding boxes for faces found in current frame
+face_encodings = []      # list of 128-dimension face encoding vectors for faces found in current frame
+face_names = []          # list of matched names corresponding to each face found in current frame
+frame_count = 0          # counts frames since last FPS calculation
+start_time = time.time() # timestamp of last FPS calculation reset
+fps = 0                  # current calculated frames per second, displayed on student view
+current_frame_names = [] # names detected in the current frame only, used to update the student view sidebar panel
 
 # ─────────────────────────────────────────────
 # 5. Window names
@@ -241,23 +242,6 @@ def process_frame(frame):
                 already_logged.append(name)  # Prevents duplicates
                 logged_times[name] = timestamp  # NEW: store timestamp so export_to_xlsx() can reference it when R is pressed
 
-                # replaces the old append logic — instead of adding one line per detection,
-                # we rewrite the entire file each time as a clean snapshot (one entry per student)
-                snapshot = []
-                for student in roster.values():
-                    n = student['name']
-                    snapshot.append({
-                        "student_name": n,
-                        "student_id": student['id'],  # includes student ID
-                        "status": "Present" if n in already_logged else "Unknown",  # default is "Unknown" instead of "Absent"
-                        "time_logged": logged_times.get(n, ""),
-                        "date": today_str
-                    })
-                # "w" overwrites the file each time instead of "a" which appended
-                with open(local_log_file, "w") as f:
-                    json.dump(snapshot, f, indent=2)
-                print(f"[LOCAL] Snapshot updated: {name} marked Present at {timestamp}")
-
                 recognized_count += 1
                 session_log.append({
                     "name": name,
@@ -310,7 +294,7 @@ def process_frame(frame):
 # ─────────────────────────────────────────────
 # 7. Draw both views
 # ─────────────────────────────────────────────
-def draw_results(frame):
+def draw_results(frame, sheet_title):
     """
     Returns two frames:
       student_view  – camera feed (left) + info panel (right)
@@ -400,10 +384,12 @@ def draw_results(frame):
             cv2.rectangle(student_view,
                           (w, banner_top), (w + PANEL_W, h),
                           GREEN_BG, cv2.FILLED)
-            cv2.putText(student_view, "Welcome!", (info_x, banner_top + 50),
+            welcome_text = f"Welcome, {featured_name}!"
+            text_scale = min(0.95, (PANEL_W - 20) / (len(welcome_text) * 14))
+            cv2.putText(student_view, welcome_text, (info_x, banner_top + 50),
                         FONT, 0.95, GREEN_TEXT, 2)
             cv2.putText(student_view, "Attendance logged", (info_x, banner_top + 82),
-                        FONT_SIMPLE, 0.55, GREEN_TEXT, 1)
+                        FONT_SIMPLE, text_scale, GREEN_TEXT, 1)
         else:
             cv2.rectangle(student_view,
                           (w, banner_top), (w + PANEL_W, h),
@@ -431,9 +417,9 @@ def draw_results(frame):
     teacher_view = np.zeros((TV_H, TV_W, 3), dtype=np.uint8)
 
     # Title
-    cv2.putText(teacher_view, "Attendance Session", (20, 42),
-                FONT, 0.9, WHITE, 1)
-    cv2.line(teacher_view, (10, 56), (TV_W - 10, 56), (70, 70, 70), 1)
+    cv2.putText(teacher_view, "Attendance Session", (20, 28), FONT, 0.9, WHITE, 1)
+    cv2.putText(teacher_view, sheet_title, (20, 52), FONT_SIMPLE, 0.42, MUTED, 1)
+    cv2.line(teacher_view, (10, 62), (TV_W - 10, 62), (70, 70, 70), 1)
 
     # ── Counter cards ──
     card_y  = 72
@@ -476,7 +462,7 @@ def draw_results(frame):
         dot_colour  = GREEN if entry["status"] == "Recognized" else RED
         name_colour = GREEN_TEXT if entry["status"] == "Recognized" else RED_TEXT
         cv2.circle(teacher_view, (20, y_log - 5), 5, dot_colour, cv2.FILLED)
-        label = f"{entry['name']}  {entry['time']}"
+        label = f"{entry['name']} ID: {entry['id']}  {entry['time']}"
         cv2.putText(teacher_view, label, (34, y_log),
                     FONT_SIMPLE, 0.52, name_colour, 1)
         y_log += 28
@@ -543,23 +529,6 @@ def export_to_xlsx():
     wb.save(filename)
     print(f"[EXPORT] Spreadsheet saved locally as '{filename}'")
 
-    try:
-        drive_service = discovery.build('drive', 'v3', credentials=creds)
-        file_metadata = {
-            'name': filename,
-            'parents': [destFolderId]
-        }
-        media = MediaFileUpload(filename, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        drive_service.files().create(body=file_metadata, media_body=media).execute()
-        print(f"[DRIVE] Uploaded '{filename}' to Drive folder")
-    except Exception as e:
-        print(f"[ERROR] Could not upload to Drive: {e}")
-    finally:
-        # Delete local file regardless of upload success
-        if os.path.exists(filename):
-            os.remove(filename)
-            print(f"[LOCAL] Deleted local file '{filename}'")
-
 # ─────────────────────────────────────────────
 # 9. FPS helper
 # ─────────────────────────────────────────────
@@ -593,7 +562,7 @@ while True:
     processed_frame = process_frame(frame)
     
     # Get the text and boxes to be drawn based on the processed frame
-    display_student, display_teacher = draw_results(processed_frame)
+    display_student, display_teacher = draw_results(processed_frame, sheet_title)
     
     # Calculate and update FPS
     current_fps = calculate_fps()
